@@ -1,0 +1,168 @@
+import time
+import json
+import os
+import threading
+import sys
+import tkinter as tk
+from tkinter import simpledialog, messagebox, Listbox, MULTIPLE
+from pynput import mouse, keyboard
+
+# 📂 현재 실행 파일의 경로를 기준으로 저장 폴더 설정 (PyInstaller 실행 대응)
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)  # .exe 파일이 위치한 디렉토리
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # 스크립트 실행 위치
+
+SAVE_DIR = os.path.join(BASE_DIR, "macro_files")
+os.makedirs(SAVE_DIR, exist_ok=True)  # 폴더 없으면 자동 생성
+
+class MacroRecorder:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("마우스 매크로 프로그램")
+        
+        self.recording = False
+        self.replaying = False
+        self.data = []
+        self.start_time = None
+        self.speed = 1.0
+
+        # UI 구성
+        self.record_button = tk.Button(root, text="🔴 녹화 시작", command=self.start_recording)
+        self.record_button.pack(pady=5)
+        
+        self.play_button = tk.Button(root, text="▶ 실행", command=self.open_macro_selection)
+        self.play_button.pack(pady=5)
+        
+        self.file_listbox = Listbox(root, height=10)
+        self.file_listbox.pack(pady=5)
+        self.update_file_list()
+        
+        self.delete_button = tk.Button(root, text="🗑 삭제", command=self.delete_selected_macro)
+        self.delete_button.pack(pady=5)
+
+        # 키보드 리스너 실행 (엔터 키 감지)
+        self.listener = keyboard.Listener(on_press=self.on_key_press)
+        self.listener.start()
+
+    def update_file_list(self):
+        """ 저장된 매크로 목록을 실시간으로 업데이트 """
+        self.file_listbox.delete(0, tk.END)
+        for file in os.listdir(SAVE_DIR):
+            if file.endswith(".json"):
+                self.file_listbox.insert(tk.END, file.replace(".json", ""))
+    
+    def delete_selected_macro(self):
+        """ 선택된 파일 삭제 """
+        selection = self.file_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("경고", "삭제할 파일을 선택하세요.")
+            return
+        
+        for index in selection[::-1]:
+            filename = self.file_listbox.get(index)
+            file_path = os.path.join(SAVE_DIR, f"{filename}.json")
+
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
+        self.update_file_list()
+        messagebox.showinfo("삭제 완료", "선택한 매크로가 삭제되었습니다.")
+
+    def start_recording(self):
+        """ 녹화 시작 (기존 데이터 초기화) """
+        if self.recording:
+            return
+        self.recording = True
+        self.data = []  # 🔥 녹화 시작 시 기존 데이터 초기화
+        self.start_time = None
+        
+        self.record_button.config(text="⏺ 녹화 중", state=tk.DISABLED)
+        self.play_button.config(state=tk.DISABLED)
+
+        def countdown():
+            for i in range(3, 0, -1):
+                self.record_button.config(text=f"⏳ {i}초 후 시작...")
+                time.sleep(1)
+            self.record_button.config(text="⏺ 녹화 중")
+            self.start_time = time.time()
+            self.mouse_listener = mouse.Listener(on_click=self.on_click, on_move=self.on_move)
+            self.mouse_listener.start()
+        
+        threading.Thread(target=countdown, daemon=True).start()
+
+    def stop_recording(self):
+        """ 녹화 중지 및 파일 저장 """
+        if not self.recording:
+            return
+        self.recording = False
+
+        self.record_button.config(text="🔴 녹화 시작", state=tk.NORMAL)
+        self.play_button.config(state=tk.NORMAL)
+
+        if hasattr(self, "mouse_listener"):
+            self.mouse_listener.stop()
+        
+        # 🔥 녹화된 데이터 확인
+        print(f"🔴 녹화된 데이터: {self.data}")  
+
+        name = simpledialog.askstring("매크로 저장", "파일명을 입력하세요:")
+        if name:
+            file_path = os.path.join(SAVE_DIR, f"{name}.json")
+
+            if not self.data:
+                messagebox.showerror("오류", "녹화된 데이터가 없습니다. 다시 시도하세요.")
+                return
+
+            try:
+                with open(file_path, "w") as f:
+                    json.dump(self.data, f, indent=4)
+                messagebox.showinfo("저장 완료", f"'{name}.json' 파일이 저장되었습니다!")
+                self.update_file_list()  # 🔥 파일 저장 후 리스트 즉시 업데이트
+            except Exception as e:
+                messagebox.showerror("저장 오류", f"파일 저장 중 오류 발생: {e}")
+
+    def open_macro_selection(self):
+        """ 실행할 매크로를 선택하는 창 열기 """
+        self.update_file_list()
+        files = [file.replace(".json", "") for file in os.listdir(SAVE_DIR) if file.endswith(".json")]
+        if not files:
+            messagebox.showwarning("경고", "실행할 매크로가 없습니다!")
+            return
+        
+        selection_window = tk.Toplevel(self.root)
+        selection_window.title("매크로 선택")
+
+        listbox = Listbox(selection_window, selectmode=MULTIPLE, height=10)
+        listbox.pack(pady=5)
+        for file in files:
+            listbox.insert(tk.END, file)
+
+        def start_macro():
+            selected_indices = listbox.curselection()
+            selected_files = [listbox.get(i) for i in selected_indices]
+            selection_window.destroy()
+            self.play_macro(selected_files)
+
+        tk.Button(selection_window, text="확인", command=start_macro).pack(pady=5)
+
+    def on_click(self, x, y, button, pressed):
+        """ 마우스 클릭 이벤트 기록 """
+        if self.recording and pressed:
+            event = {
+                "type": "click",
+                "time": time.time() - self.start_time,
+                "position": (x, y),
+                "button": "left" if button == mouse.Button.left else "right"
+            }
+            self.data.append(event)
+
+    def on_key_press(self, key):
+        if key == keyboard.Key.enter:
+            if self.recording:
+                self.stop_recording()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = MacroRecorder(root)
+    root.mainloop()
